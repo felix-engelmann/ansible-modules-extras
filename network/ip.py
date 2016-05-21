@@ -1,4 +1,62 @@
 #!/usr/bin/python
+#
+# This module is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This software is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this software.  If not, see <http://www.gnu.org/licenses/>.
+
+DOCUMENTATION = '''
+---
+module: ip
+version_added: 0.1
+author: "Felix Engelmann (@felix-engelmann)"
+short_description: Wrapper of the linux ip tool
+requirements: [ pyroute2 ]
+description:
+    - Performs linux ip address manipulations for interfaces and route adjustments
+options:
+    mode:
+        required: true
+        choices: [ address, route ]
+        description:
+            - Whether to change an address or a route
+    state:
+        required: false
+        default: "present"
+        choices: [ present, absent ]
+        description:
+            - Whether the address should be assigned to the interface or removed
+              respectively whether the route should be set or removed
+    addr:
+        required: false
+        description:
+            - The address to set or remove with prefix length (e.g. 2001:db8::2/64, 10.0.0.2/24, 10.0.0.2/255.255.255.0)
+    dev:
+        required: false
+        description:
+            - The device to set or remove the address from.
+'''
+
+EXAMPLES = '''
+# set address 2001:db8::42/64 to interface eth0
+- ip: mode=address addr=2001:db8::42/64 dev=eth0 state=present
+
+# change prefix length (watch out that any other assignments of same address with different prefix will be deleted)
+- ip: mode=address addr=2001:db8::42/112 dev=eth0 state=present
+
+# remove address from interface eth0
+- ip: mode=address addr=2001:db8::42/112 dev=eth0 state=absent
+
+'''
+
 
 from pyroute2 import IPRoute
 from pyroute2.netlink.exceptions import NetlinkError
@@ -24,7 +82,6 @@ def main():
             mode  = dict(choices=['address','route'], default=None, required=True),
             state = dict(choices=['present','absent'], default='present'),
             addr  = dict(default=None),
-            prefixlen  = dict(default=None, type='int'),
             dev   = dict(default=None),
         ),
     )
