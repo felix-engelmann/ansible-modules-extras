@@ -72,6 +72,10 @@ EXAMPLES = '''
 
 '''
 
+RETURN = '''
+---
+'''
+
 import ipaddress
 
 def parse_ip(text):
