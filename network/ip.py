@@ -41,7 +41,7 @@ options:
         aliases: [ net ]
         description:
             - The address to set or remove with prefix length. (e.g. 2001:db8::2/64, 10.0.0.2/24, 10.0.0.2/255.255.255.0)
-              For nets the default route is specified by 0.0.0.0/0 or ::/0 .
+              For nets, the default route is specified by v4default or v6default .
     dev:
         required: true
         description:
@@ -80,7 +80,7 @@ EXAMPLES = '''
 - ip: mode=route net=2001:db3::/48 via=fe80::3123 dev=eth0
 
 # add IPv4 default route through gateway 192.168.0.1 at eth0
-- ip: mode=route net=0.0.0.0/0 via=192.168.0.1 dev=eth0
+- ip: mode=route net=v4default via=192.168.0.1 dev=eth0
 
 # remove IPv6 default route at interface eth0
 - ip: mode=route net=::/0 dev=eth0 state=absent
@@ -127,6 +127,7 @@ except ImportError:
     HAS_PYROUTE=0
 
 ip=None
+module=None
 
 def l_key(l,key):
     elems=list(filter(lambda x: x[0] == key,l))
@@ -138,19 +139,24 @@ def l_key(l,key):
 def parse_ip(text):
     addr=None
     if text:
-        try:
-            # is it an IPv6
-            addr = ipaddress.IPv6Interface(u''+text)
-        except ipaddress.AddressValueError:
+        if text == 'v4default':
+            addr=ipaddress.IPv4Interface(u'0.0.0.0/0')
+        elif text == 'v6default':
+            addr=ipaddress.IPv6Interface(u'::/0')
+        else:
             try:
-                # fall back to parse it as IPv4
-                addr = ipaddress.IPv4Interface(u''+text)
+                # is it an IPv6
+                addr = ipaddress.IPv6Interface(u''+text)
+            except ipaddress.AddressValueError:
+                try:
+                    # fall back to parse it as IPv4
+                    addr = ipaddress.IPv4Interface(u''+text)
+                except Exception:
+                    e = get_exception()
+                    module.fail_json(msg='can not parse ip %s : %s'%(text,str(e)))
             except Exception:
                 e = get_exception()
                 module.fail_json(msg='can not parse ip %s : %s'%(text,str(e)))
-        except Exception:
-            e = get_exception()
-            module.fail_json(msg='can not parse ip %s : %s'%(text,str(e)))
     return(addr)
 
 #object to hold all important information of a device
@@ -176,7 +182,7 @@ class Device(object):
     def get_addr_diff_lens(self, addr):
         return [x for x in self.addresses if x.ip == addr.ip and x.network != addr.network]
         
-    # adds address to interface
+    # adds address to interface (not reflected in local data)
     def add_addr(self, addr):
         try:
             ip.addr('add', index=self.id, address=addr.ip.compressed, prefixlen=addr.network.prefixlen)
@@ -184,13 +190,15 @@ class Device(object):
             e = get_exception()
             module.fail_json(msg='could not add address %s to device %s: %s'%(addr.ip.compressed,self.name,str(e)) )
     
+    # deletes address from interface (not reflected in local data)
     def del_addr(self, addr):
         try:
             ip.addr('delete', index=self.id, address=addr.ip.compressed, prefixlen=addr.network.prefixlen)
         except NetlinkError:
             e = get_exception()
             module.fail_json(msg='could not delete address %s from device %s: %s'%(addr.ip.compressed,self.name,str(e)) )
-            
+    
+    #factory device from device name
     @staticmethod
     def factoryDeviceFromName(ifname):
         devids = ip.link_lookup(ifname=ifname)
@@ -233,8 +241,92 @@ class Device(object):
         for a in self.addresses:
             print(" - %s/%d"%(a.ip.compressed,a.network.prefixlen))
 
+#object to hold all important information on a route
+class Route(object):
+    def __init__(self,net,interface,gateway=None):
+        self.net=net
+        self.interface=interface
+        self.gateway=gateway
+        
+    def __eq__(self, other):
+        if type(other) is type(self):
+            return self.net == other.net and self.interface == other.interface
+        return False
+        
+    def dump(self):
+        if self.gateway:
+            print("%s/%d -> %d (%s)"%(self.net.ip.compressed,self.net.network.prefixlen
+                                    ,self.interface,self.gateway.ip.compressed))
+        else:
+            print("%s/%d -> %d"%(self.net.ip.compressed,self.net.network.prefixlen
+                                    ,self.interface))
+        
+
+#object to hold all important information for routes
+class Routes(object):
+    
+    def __init__(self,routes):
+        self.routes=routes
+    
+    def has_route(self,dst,dev,via=None):
+        for r in [x for x in self.routes if x == Route(dst,dev.id)]:
+            if r.gateway == via:
+                return True
+        return False
+    
+    def has_route_any_gw(self,dst,dev):
+        return Route(dst,dev.id) in self.routes
+        
+    def del_route(self,dst,dev):
+        try:
+            ip.route('delete',dst=str(dst.network),oif=dev.id)
+        except NetlinkError:
+            e = get_exception()
+            module.fail_json(msg='could not delete route %s via device %s: %s'%(str(dst.network),dev.name,str(e)) )
+        
+    def add_route(self,dst,dev,via):
+        try:
+            if via:
+                ip.route('add',dst=str(dst.network),oif=dev.id,gateway=str(via.ip))
+            else:
+                ip.route('add',dst=str(dst.network),oif=dev.id)
+        except NetlinkError:
+            e = get_exception()
+            module.fail_json(msg='could not add route %s via device %s and gw %s: %s'%(str(dst.network)
+                                ,dev.name,str(via),str(e)) )
+    
+    #factory get all Routes
+    @staticmethod
+    def factoryRoutes():
+        rs=[]
+        for family in [AF_INET,AF_INET6]:
+            routes=ip.get_routes(family=family)
+            for route in routes:
+                rif   = l_key(route['attrs'],'RTA_OIF')
+                rgw   = l_key(route['attrs'],'RTA_GATEWAY')
+                rvia = None
+                if rgw:
+                    rvia = parse_ip(rgw)
+                rdst  = l_key(route['attrs'],'RTA_DST')
+                rplen = route['dst_len']
+                if rplen == 0:
+                    # default route
+                    if family == AF_INET:
+                        rdnet = parse_ip("v4default")
+                    else:
+                        rdnet = parse_ip("v6default")
+                else:
+                    rdnet = parse_ip(rdst+"/"+str(rplen))
+                rs.append(Route(rdnet,rif,rvia))
+        return Routes(rs)
+    
+    def dump(self):
+        for r in self.routes:
+            r.dump()
+    
 def main():
     # new Ansible module
+    global module
     module = AnsibleModule(
         argument_spec = dict(
             mode  = dict(choices=['address','route','link'], default=None, required=True),
@@ -298,7 +390,28 @@ def main():
                 module.exit_json(changed=changed)
         
     elif mode == 'route':
-        module.fail_json(msg='Not yet implemented')
+        if not (dev and addr):    
+            module.fail_json(msg='valid device and network required')
+            
+        routes = Routes.factoryRoutes()
+        
+        if state == "absent":
+            if routes.has_route_any_gw(addr,dev):
+                routes.del_route(addr,dev)
+                module.exit_json(changed=True)
+            else:
+                module.exit_json(changed=False)
+        else:
+            if routes.has_route(addr,dev,via):
+                module.exit_json(changed=False)
+            elif routes.has_route_any_gw(addr,dev):
+                # route exists but with different gateway
+                # remove it before adding new route
+                routes.del_route(addr,dev)
+            
+            routes.add_route(addr,dev,via)
+            module.exit_json(changed=True)
+                
     elif mode == 'link':
         module.fail_json(msg='Not yet implemented')
     
