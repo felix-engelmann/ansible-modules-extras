@@ -21,13 +21,13 @@ author: "Felix Engelmann (@felix-engelmann)"
 short_description: Wrapper of the linux ip tool
 requirements: [ pyroute2 ]
 description:
-    - Performs linux ip address manipulations for interfaces and route adjustments
+    - Performs linux ip address manipulations for interfaces and route adjustments.
 options:
     mode:
         required: true
         choices: [ address, route ]
         description:
-            - Whether to change an address or a route
+            - Whether to change an address or a route.
     state:
         required: false
         default: "present"
@@ -40,7 +40,7 @@ options:
         aliases: [ net ]
         description:
             - The address to set or remove with prefix length. (e.g. 2001:db8::2/64, 10.0.0.2/24, 10.0.0.2/255.255.255.0)
-              For nets the default route is specified by 0.0.0.0/0 or ::/0
+              For nets the default route is specified by 0.0.0.0/0 or ::/0 .
     dev:
         required: true
         description:
@@ -48,7 +48,7 @@ options:
     via:
         required: false
         description:
-            - ip address of gateway for manipulating routes.
+            - IP address of gateway for manipulating routes.
 '''
 
 EXAMPLES = '''
@@ -72,10 +72,6 @@ EXAMPLES = '''
 
 '''
 
-
-from pyroute2 import IPRoute
-from pyroute2.netlink.exceptions import NetlinkError
-from pyroute2.netlink import AF_INET6, AF_INET
 import ipaddress
 
 def parse_ip(text):
@@ -93,6 +89,7 @@ def parse_ip(text):
     return(addr)
 
 def main():
+    
     module = AnsibleModule(
         argument_spec = dict(
             mode  = dict(choices=['address','route'], default=None, required=True),
@@ -102,6 +99,13 @@ def main():
             via   = dict(default=None),
         ),
     )
+    
+    try:
+        from pyroute2 import IPRoute
+        from pyroute2.netlink.exceptions import NetlinkError
+        from pyroute2.netlink import AF_INET6, AF_INET
+    except:
+        module.fail_json(msg='pyroute2 not installed')
     
     ip = IPRoute()
     
