@@ -16,7 +16,7 @@
 DOCUMENTATION = '''
 ---
 module: ip
-version_added: 0.1
+version_added: 2.2
 author: "Felix Engelmann (@felix-engelmann)"
 short_description: Wrapper of the linux ip tool
 requirements: [ pyroute2 ]
@@ -34,15 +34,21 @@ options:
         choices: [ present, absent ]
         description:
             - Whether the address should be assigned to the interface or removed
-              respectively whether the route should be set or removed
+              respectively whether the route should be set or removed.
     addr:
-        required: false
+        required: true
+        aliases: [ net ]
         description:
-            - The address to set or remove with prefix length (e.g. 2001:db8::2/64, 10.0.0.2/24, 10.0.0.2/255.255.255.0)
+            - The address to set or remove with prefix length. (e.g. 2001:db8::2/64, 10.0.0.2/24, 10.0.0.2/255.255.255.0)
+              For nets the default route is specified by 0.0.0.0/0 or ::/0
     dev:
+        required: true
+        description:
+            - The device to set or remove the address/route from.
+    via:
         required: false
         description:
-            - The device to set or remove the address from.
+            - ip address of gateway for manipulating routes.
 '''
 
 EXAMPLES = '''
@@ -55,11 +61,21 @@ EXAMPLES = '''
 # remove address from interface eth0
 - ip: mode=address addr=2001:db8::42/112 dev=eth0 state=absent
 
+# add route for net 2001:db3::/48 via fe80::3123 through interface eth0
+- ip: mode=route net=2001:db3::/48 via=fe80::3123 dev=eth0
+
+# add IPv4 default route through gateway 192.168.0.1 at eth0
+- ip: mode=route net=0.0.0.0/0 via=192.168.0.1 dev=eth0
+
+# remove IPv6 default route at interface eth0
+- ip: mode=route net=::/0 dev=eth0 state=absent
+
 '''
 
 
 from pyroute2 import IPRoute
 from pyroute2.netlink.exceptions import NetlinkError
+from pyroute2.netlink import AF_INET6, AF_INET
 import ipaddress
 
 def parse_ip(text):
@@ -81,8 +97,9 @@ def main():
         argument_spec = dict(
             mode  = dict(choices=['address','route'], default=None, required=True),
             state = dict(choices=['present','absent'], default='present'),
-            addr  = dict(default=None),
-            dev   = dict(default=None),
+            addr  = dict(default=None,aliases=['net'],required=True),
+            dev   = dict(default=None,required=True),
+            via   = dict(default=None),
         ),
     )
     
@@ -90,23 +107,20 @@ def main():
     
     params = module.params
     
+    try:
+        setto=parse_ip(u''+params['addr'])
+    except Exception as e:
+        module.fail_json(msg='invalid address: '+str(e))
+    
+    devids = ip.link_lookup(ifname=params['dev'])
+
+    if len(devids) != 1:
+        module.fail_json(msg='device does not exist')
+    devid=devids[0]
+    
     if params['mode'] == 'address':
-        
-        if params['addr'] == None or params['dev'] == None:
-            module.fail_json(msg='addr and dev are mandator parameters')
-    
-        devids = ip.link_lookup(ifname=params['dev'])
-    
-        if len(devids) != 1:
-            module.fail_json(dev=params['dev'],msg='device does not exist')
-        devid=devids[0]
     
         devaddrs = ip.get_addr(index=devid)
-        
-        try:
-            setto=parse_ip(u''+params['addr'])
-        except Exception as e:
-            module.fail_json(addr=params['addr'],msg='invalid address: '+str(e))
         
         ifaddrs = []
         for ad in devaddrs:
@@ -135,13 +149,76 @@ def main():
                     changed=True
                     
         except NetlinkError as e:
-            module.fail_json(addr=params['addr'],msg='could not perform operation: '+str(e))
+            module.fail_json(msg='could not perform operation: '+str(e))
             
-        module.exit_json(addr=setto.ip.compressed,prefixlen=setto.network.prefixlen, changed=changed)
+        module.exit_json( changed=changed)
         
     elif params['mode'] == 'route':
-        module.fail_json(msg='Not yet implemented')
-    
+        
+        if type(setto) == ipaddress.IPv4Interface:
+            family = AF_INET
+        else:
+            family = AF_INET6
+        
+        routes=ip.get_routes(family=family)
+        
+        via=None
+        if params['via'] != None:
+            try:
+                via=parse_ip(u''+params['via'])
+            except Exception as e:
+                module.fail_json(msg='invalid via address: '+str(e))
+        
+        present=False
+        for route in routes:
+            oif=list(filter(lambda x: x[0] == 'RTA_OIF' , route["attrs"]))[0][1]
+            gws=list(filter(lambda x: x[0] == 'RTA_GATEWAY' , route["attrs"]))
+            gw=None
+            if len(gws) == 1:
+                gw=parse_ip(u''+gws[0][1])
+                
+            prefixlen = route['dst_len']
+            
+            dsts=list(filter(lambda x: x[0] == 'RTA_DST' , route["attrs"]))
+            if len(dsts) == 1:
+                dst=parse_ip(u''+dsts[0][1]+'/'+str(prefixlen))
+            else:
+                if family == AF_INET:
+                    dst=ipaddress.IPv4Interface(u'0.0.0.0/'+str(prefixlen))
+                else:
+                    dst=ipaddress.IPv6Interface(u'::/'+str(prefixlen))
+            
+            #print("set %s == %s" %(str(setto.network),str(dst.network)))
+            
+            if setto.network == dst.network and oif == devid:
+                if params['state']=='absent':
+                    try:
+                        ip.route('delete',dst=str(dst.network),oif=oif)
+                    except NetlinkError as e:
+                        module.fail_json(msg='could not delete route: '+str(e))
+                    
+                    module.exit_json(changed=True)
+                if via == None:
+                    present=True
+                    break
+                elif gw.ip == via.ip:
+                    present=True
+                    break
+                     
+        
+        if not present and params['state']=='present':
+            try:
+                if via == None:
+                    ip.route('add', dst=str(setto.network), oif=devid)
+                else:
+                    ip.route('add', dst=str(setto.network), gateway=str(via.ip), oif=devid)
+            except NetlinkError as e:
+                module.fail_json(msg='could not add route: '+str(e))
+                
+            module.exit_json(changed=True)
+        
+        module.exit_json(changed=False)
+        
 
 
 # import module snippets
