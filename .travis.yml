@@ -100,7 +100,6 @@ env:
       network/f5/bigip_pool_member.py
       network/f5/bigip_pool.py
       network/f5/bigip_virtual_server.py
-      network/ip.py
       network/nmcli.py
       network/openvswitch_bridge.py
       network/openvswitch_port.py
