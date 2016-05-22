@@ -169,11 +169,49 @@ def main():
     
     if params['mode'] == 'link':
         
+        devids=ip.link_lookup(ifname=params['dev'])
+        linkids=ip.link_lookup(ifname=params['link'])
+        
+        if len(devids) != 1:
+            module.fail_json(msg='device does not exist')
+        
         #special treatment, as port is not an interface
         if params['kind'] == 'port':
-            module.fail_json(msg='port not yet implemented')
-        
-        devids=ip.link_lookup(ifname=params['dev'])
+            
+            ifinfo=ip.link("get", index=devids[0])[0]['attrs']
+            lmaster = l_key(ifinfo,'IFLA_MASTER')
+            if params['state']=='absent':
+                if lmaster:
+                    try:
+                        ip.link("set", index=devids[0], master=0)
+                        module.exit_json(changed=True)
+                    except Exception:
+                        e = get_exception()
+                        module.fail_json(msg='could not remove interface from bridge: '+str(e))
+                else:
+                    module.exit_json(changed=False)        
+            else:
+                if len(linkids) == 0:
+                    module.fail_json(msg='please specify bridge')
+                # check if master is a bridge
+                ifinfo=ip.link("get", index=linkids[0])[0]['attrs']
+                linfo = l_key(ifinfo,'IFLA_LINKINFO')
+                if linfo:
+                    lkind=l_key(linfo['attrs'],'IFLA_INFO_KIND')
+                    if lkind != 'bridge':
+                        module.fail_json(msg='master is not a bridge interface')
+                else:
+                    module.fail_json(msg='master is not a bridge interface')
+                
+                if lmaster == linkids[0]:
+                    module.exit_json(changed=False)
+                else:
+                    try:
+                        ip.link("set", index=devids[0], master=linkids[0])
+                        module.exit_json(changed=True)
+                    except Exception:
+                        e = get_exception()
+                        module.fail_json(msg='could not add interface to bridge: '+str(e))
         
         if params['state']=='absent':
             if len(devids) == 1 :
@@ -197,8 +235,28 @@ def main():
         
         
         if params['kind'] == None:
-            module.fail_json(msg='ifup not yet implemented')
-            pass
+            #if updown
+            if params['state']=='absent':
+                if l_key(ip.link("get", index=devids[0])[0]['attrs'],'IFLA_OPERSTATE') == 'DOWN':
+                    module.exit_json(changed=False)
+                else:
+                    try:
+                        ip.link("set", index=devids[0], state="down")
+                        module.exit_json(changed=True)
+                    except Exception:
+                        e = get_exception()
+                        module.fail_json(msg='could not down interface: '+str(e))
+            else:
+                if l_key(ip.link("get", index=devids[0])[0]['attrs'],'IFLA_OPERSTATE') == 'UP':
+                    module.exit_json(changed=False)
+                else:
+                    try:
+                        ip.link("set", index=devids[0], state="up")
+                        module.exit_json(changed=True)
+                    except Exception:
+                        e = get_exception()
+                        module.fail_json(msg='could not up interface: '+str(e))
+                
         elif params['kind'] == 'bridge':
             if len(devids) > 0:
                 #IF exists check if for correct kind
