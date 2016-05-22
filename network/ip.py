@@ -25,9 +25,9 @@ description:
 options:
     mode:
         required: true
-        choices: [ address, route ]
+        choices: [ address, route, link ]
         description:
-            - Whether to change an address or a route.
+            - Whether to change an address, route or interface.
     state:
         required: false
         default: "present"
@@ -35,8 +35,9 @@ options:
         description:
             - Whether the address should be assigned to the interface or removed
               respectively whether the route should be set or removed.
+              or the interface should be brought up or down
     addr:
-        required: true
+        required: false
         aliases: [ net ]
         description:
             - The address to set or remove with prefix length. (e.g. 2001:db8::2/64, 10.0.0.2/24, 10.0.0.2/255.255.255.0)
@@ -44,11 +45,25 @@ options:
     dev:
         required: true
         description:
-            - The device to set or remove the address/route from.
+            - The device to set or remove the address/route from. Or the name of the new link.
     via:
         required: false
         description:
             - IP address of gateway for manipulating routes.
+    kind:
+        required: false
+        choices: [ bridge, vlan, veth, port ]
+        description:
+            - Type of link to create or to set/remove interface as port of bridge.
+    link:
+        required: false
+        aliases: [ peer, master ]
+        description:
+            - The interface name of the parent link for vlan or second peer for veth interfaces.
+    vlan_id:
+        required: false
+        description:
+            - The vlan ID for vlan interfaces.
 '''
 
 EXAMPLES = '''
@@ -70,6 +85,30 @@ EXAMPLES = '''
 # remove IPv6 default route at interface eth0
 - ip: mode=route net=::/0 dev=eth0 state=absent
 
+# create bridge br0
+- ip: mode=link dev=br0 kind=bridge
+
+# add eth0 to bridge br0
+- ip: mode=link dev=eth0 kind=port master=br0
+
+# remove eth0 from bridge
+- ip: mode=link dev=eth0 kind=port state=absent
+
+# create a veth interface pair of v1p0 and v1p1
+- ip: mode=link dev=v1p0 kind=veth peer=v1p1
+
+# add vlan interface with id 42 onto eth0
+- ip: mode=link dev=v100 kind=vlan link=eth0 vlan_id=42
+
+# delete interface br0
+- ip: mode=link dev=br0 state=absent 
+
+# bring up existing interface
+- ip: mode=link dev=eth1 
+
+# bring down pyhsical interface
+- ip: mode=link dev=eth1 state=absent 
+
 '''
 
 RETURN = '''
@@ -78,6 +117,13 @@ RETURN = '''
 
 import ipaddress
 from ansible.module_utils.pycompat24 import get_exception
+
+def l_key(l,key):
+    elems=list(filter(lambda x: x[0] == key,l))
+    if len(elems) == 0:
+        return None
+    else:
+        return elems[0][1]
 
 def parse_ip(text):
     addr=None
@@ -99,11 +145,14 @@ def main():
     
     module = AnsibleModule(
         argument_spec = dict(
-            mode  = dict(choices=['address','route'], default=None, required=True),
+            mode  = dict(choices=['address','route','link'], default=None, required=True),
             state = dict(choices=['present','absent'], default='present'),
-            addr  = dict(default=None,aliases=['net'],required=True),
+            addr  = dict(default=None,aliases=['net']),
             dev   = dict(default=None,required=True),
             via   = dict(default=None),
+            kind  = dict(choices=['bridge','vlan','veth','port'],default=None),
+            link  = dict(default=None,aliases=['peer','master']),
+            vlan_id= dict(default=None,type='int'),
         ),
     )
     
@@ -118,6 +167,67 @@ def main():
     
     params = module.params
     
+    if params['mode'] == 'link':
+        
+        #special treatment, as port is not an interface
+        if params['kind'] == 'port':
+            module.fail_json(msg='port not yet implemented')
+        
+        devids=ip.link_lookup(ifname=params['dev'])
+        
+        if params['state']=='absent':
+            if len(devids) == 1 :
+                try:
+                    ip.link("del",index=devids[0])
+                    module.exit_json(changed=True)
+                except NetlinkError:
+                    e = get_exception()
+                    try:
+                        #HW IFs not deletable, try to bring it down
+                        if l_key(ip.link("get", index=devids[0])[0]['attrs'],'IFLA_OPERSTATE') == 'DOWN':
+                            module.exit_json(changed=False)
+                        else:
+                            ip.link("set", index=devids[0], state="down")
+                            module.exit_json(changed=True)
+                    except Exception:
+                        e = get_exception()
+                        module.fail_json(msg='could not delete or DOWN interface: '+str(e))
+            else:
+                module.exit_json(changed=False)
+        
+        
+        if params['kind'] == None:
+            module.fail_json(msg='ifup not yet implemented')
+            pass
+        elif params['kind'] == 'bridge':
+            if len(devids) > 0:
+                #IF exists check if for correct kind
+                ifinfo=ip.link("get", index=devids[0])[0]['attrs']
+                linfo = l_key(ifinfo,'IFLA_LINKINFO')
+                if linfo:
+                    lkind=l_key(linfo['attrs'],'IFLA_INFO_KIND')
+                    if lkind != 'bridge':
+                        module.fail_json(msg='interface exists already but is not a bridge')
+                    else:
+                        # state is implicitly given by members
+                        module.exit_json(changed=False)
+                else:
+                    #no LINKINFO given - probably 
+                    module.fail_json(msg='interface exists already but is not a bridge')
+            else:
+                #create bridge
+                try:
+                    ip.link("add",ifname=params['dev'],kind="bridge")
+                    module.exit_json(changed=True)
+                except Exception:
+                    e = get_exception()
+                    module.fail_json(msg='could not create bridge: '+str(e))
+        
+        elif params['kind'] == 'vlan':
+            module.fail_json(msg='vlan not yet implemented')
+        elif params['kind'] == 'veth':
+            module.fail_json(msg='veth not yet implemented')
+        
     try:
         setto=parse_ip(u''+params['addr'])
     except Exception:
