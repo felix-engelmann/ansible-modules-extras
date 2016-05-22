@@ -115,8 +115,18 @@ RETURN = '''
 ---
 '''
 
-import ipaddress
 from ansible.module_utils.pycompat24 import get_exception
+
+try:
+    from pyroute2 import IPRoute
+    from pyroute2.netlink.exceptions import NetlinkError
+    from pyroute2.netlink import AF_INET6, AF_INET
+    import ipaddress
+    HAS_PYROUTE=1
+except ImportError:
+    HAS_PYROUTE=0
+
+ip=None
 
 def l_key(l,key):
     elems=list(filter(lambda x: x[0] == key,l))
@@ -127,22 +137,104 @@ def l_key(l,key):
 
 def parse_ip(text):
     addr=None
-    try:
-        addr = ipaddress.IPv6Interface(text)
-    except ipaddress.AddressValueError:
+    if text:
         try:
-            addr = ipaddress.IPv4Interface(text)
+            # is it an IPv6
+            addr = ipaddress.IPv6Interface(u''+text)
+        except ipaddress.AddressValueError:
+            try:
+                # fall back to parse it as IPv4
+                addr = ipaddress.IPv4Interface(u''+text)
+            except Exception:
+                e = get_exception()
+                module.fail_json(msg='can not parse ip %s : %s'%(text,str(e)))
         except Exception:
             e = get_exception()
-            raise e
-    except Exception:
-        e = get_exception()
-        raise e
-        
+            module.fail_json(msg='can not parse ip %s : %s'%(text,str(e)))
     return(addr)
 
-def main():
+#object to hold all important information of a device
+class Device(object):
     
+    def __init__(self,name,devid,addresses,state,master,kind,vlanid):
+        self.name=name
+        self.id=devid
+        self.addresses=addresses
+        self.state=state
+        self.master=master
+        self.kind=kind
+        self.vlanid=vlanid
+        
+    def is_bridge(self):
+        return self.kind=='bridge'
+    
+    # check if addr is assigned to this IF. Prefix has to match.
+    def has_address(self, addr):
+        return addr in self.addresses
+    
+    # check if ip is assiged. Prefixes can differ.
+    def get_addr_diff_lens(self, addr):
+        return [x for x in self.addresses if x.ip == addr.ip and x.network != addr.network]
+        
+    # adds address to interface
+    def add_addr(self, addr):
+        try:
+            ip.addr('add', index=self.id, address=addr.ip.compressed, prefixlen=addr.network.prefixlen)
+        except NetlinkError:
+            e = get_exception()
+            module.fail_json(msg='could not add address %s to device %s: %s'%(addr.ip.compressed,self.name,str(e)) )
+    
+    def del_addr(self, addr):
+        try:
+            ip.addr('delete', index=self.id, address=addr.ip.compressed, prefixlen=addr.network.prefixlen)
+        except NetlinkError:
+            e = get_exception()
+            module.fail_json(msg='could not delete address %s from device %s: %s'%(addr.ip.compressed,self.name,str(e)) )
+            
+    @staticmethod
+    def factoryDeviceFromName(ifname):
+        devids = ip.link_lookup(ifname=ifname)
+        if len(devids) != 1:
+            return None
+        else:
+            # fetch address related information
+            devaddrs = ip.get_addr(index=devids[0])
+            
+            addrs=[]
+            
+            for addr in devaddrs:
+                ifip = l_key(addr['attrs'],'IFA_ADDRESS')
+                prefixlen = addr['prefixlen']
+                
+                addrobj = parse_ip(ifip+"/"+str(prefixlen))
+                if addrobj:
+                    addrs.append(addrobj)
+        
+            # fetch link related information
+            link = ip.get_links(devids[0])[0]['attrs']
+            
+            linkstate  = l_key(link,'IFLA_OPERSTATE')
+            linkmaster = l_key(link,'IFLA_MASTER')
+            
+            linkinfo = l_key(link,'IFLA_LINKINFO')
+            linkkind = 'system'
+            vlanid = None
+            if linkinfo:
+                linkkind=l_key(linkinfo['attrs'],'IFLA_INFO_KIND')
+                if linkkind == 'vlan':
+                    infodata = l_key(linkinfo['attrs'],'IFLA_INFO_DATA')['attrs']
+                    vlanid = l_key(infodata,'IFLA_VLAN_ID')
+            
+             
+            return Device(ifname,devids[0],addrs,linkstate,linkmaster,linkkind,vlanid)
+            
+    def dump(self):
+        print("if: %s (%d) %s"%(self.name,self.id,self.state))
+        for a in self.addresses:
+            print(" - %s/%d"%(a.ip.compressed,a.network.prefixlen))
+
+def main():
+    # new Ansible module
     module = AnsibleModule(
         argument_spec = dict(
             mode  = dict(choices=['address','route','link'], default=None, required=True),
@@ -156,255 +248,60 @@ def main():
         ),
     )
     
-    try:
-        from pyroute2 import IPRoute
-        from pyroute2.netlink.exceptions import NetlinkError
-        from pyroute2.netlink import AF_INET6, AF_INET
-    except:
-        module.fail_json(msg='pyroute2 not installed')
+    # this module can not work without pyroute2 and needs ipaddress for IP manipulations
+    # ipaddress is shipped with python
     
+    if not HAS_PYROUTE:
+        module.fail_json(msg='pyroute2 is not installed')
+    
+    global ip    
     ip = IPRoute()
     
-    params = module.params
-    
-    if params['mode'] == 'link':
+    # parameters and their processing
+    params  = module.params
+    mode    = params['mode']
+    state   = params['state']
+    addr    = parse_ip(params['addr'])
+    dev     = Device.factoryDeviceFromName(params['dev'])
+    via     = parse_ip(params['via'])
+    kind    = params['kind']
+    link    = Device.factoryDeviceFromName(params['dev'])
+    vlan_id = params['vlan_id']
+     
+    # separate different modes
+    if mode == 'address':
+        # check for required arguments
+        if not (dev and addr):    
+            module.fail_json(msg='valid device and address required')
         
-        devids=ip.link_lookup(ifname=params['dev'])
-        linkids=ip.link_lookup(ifname=params['link'])
-        
-        if len(devids) != 1:
-            module.fail_json(msg='device does not exist')
-        
-        #special treatment, as port is not an interface
-        if params['kind'] == 'port':
-            
-            ifinfo=ip.link("get", index=devids[0])[0]['attrs']
-            lmaster = l_key(ifinfo,'IFLA_MASTER')
-            if params['state']=='absent':
-                if lmaster:
-                    try:
-                        ip.link("set", index=devids[0], master=0)
-                        module.exit_json(changed=True)
-                    except Exception:
-                        e = get_exception()
-                        module.fail_json(msg='could not remove interface from bridge: '+str(e))
-                else:
-                    module.exit_json(changed=False)        
-            else:
-                if len(linkids) == 0:
-                    module.fail_json(msg='please specify bridge')
-                # check if master is a bridge
-                ifinfo=ip.link("get", index=linkids[0])[0]['attrs']
-                linfo = l_key(ifinfo,'IFLA_LINKINFO')
-                if linfo:
-                    lkind=l_key(linfo['attrs'],'IFLA_INFO_KIND')
-                    if lkind != 'bridge':
-                        module.fail_json(msg='master is not a bridge interface')
-                else:
-                    module.fail_json(msg='master is not a bridge interface')
-                
-                if lmaster == linkids[0]:
-                    module.exit_json(changed=False)
-                else:
-                    try:
-                        ip.link("set", index=devids[0], master=linkids[0])
-                        module.exit_json(changed=True)
-                    except Exception:
-                        e = get_exception()
-                        module.fail_json(msg='could not add interface to bridge: '+str(e))
-        
-        if params['state']=='absent':
-            if len(devids) == 1 :
-                try:
-                    ip.link("del",index=devids[0])
-                    module.exit_json(changed=True)
-                except NetlinkError:
-                    e = get_exception()
-                    try:
-                        #HW IFs not deletable, try to bring it down
-                        if l_key(ip.link("get", index=devids[0])[0]['attrs'],'IFLA_OPERSTATE') == 'DOWN':
-                            module.exit_json(changed=False)
-                        else:
-                            ip.link("set", index=devids[0], state="down")
-                            module.exit_json(changed=True)
-                    except Exception:
-                        e = get_exception()
-                        module.fail_json(msg='could not delete or DOWN interface: '+str(e))
-            else:
+        if dev.has_address(addr):
+            if state == "present":
                 module.exit_json(changed=False)
-        
-        
-        if params['kind'] == None:
-            #if updown
-            if params['state']=='absent':
-                if l_key(ip.link("get", index=devids[0])[0]['attrs'],'IFLA_OPERSTATE') == 'DOWN':
-                    module.exit_json(changed=False)
-                else:
-                    try:
-                        ip.link("set", index=devids[0], state="down")
-                        module.exit_json(changed=True)
-                    except Exception:
-                        e = get_exception()
-                        module.fail_json(msg='could not down interface: '+str(e))
             else:
-                if l_key(ip.link("get", index=devids[0])[0]['attrs'],'IFLA_OPERSTATE') == 'UP':
-                    module.exit_json(changed=False)
-                else:
-                    try:
-                        ip.link("set", index=devids[0], state="up")
-                        module.exit_json(changed=True)
-                    except Exception:
-                        e = get_exception()
-                        module.fail_json(msg='could not up interface: '+str(e))
-                
-        elif params['kind'] == 'bridge':
-            if len(devids) > 0:
-                #IF exists check if for correct kind
-                ifinfo=ip.link("get", index=devids[0])[0]['attrs']
-                linfo = l_key(ifinfo,'IFLA_LINKINFO')
-                if linfo:
-                    lkind=l_key(linfo['attrs'],'IFLA_INFO_KIND')
-                    if lkind != 'bridge':
-                        module.fail_json(msg='interface exists already but is not a bridge')
-                    else:
-                        # state is implicitly given by members
-                        module.exit_json(changed=False)
-                else:
-                    #no LINKINFO given - probably 
-                    module.fail_json(msg='interface exists already but is not a bridge')
-            else:
-                #create bridge
-                try:
-                    ip.link("add",ifname=params['dev'],kind="bridge")
-                    module.exit_json(changed=True)
-                except Exception:
-                    e = get_exception()
-                    module.fail_json(msg='could not create bridge: '+str(e))
-        
-        elif params['kind'] == 'vlan':
-            module.fail_json(msg='vlan not yet implemented')
-        elif params['kind'] == 'veth':
-            module.fail_json(msg='veth not yet implemented')
-        
-    try:
-        setto=parse_ip(u''+params['addr'])
-    except Exception:
-        e = get_exception()
-        module.fail_json(msg='invalid address: '+str(e))
-    
-    devids = ip.link_lookup(ifname=params['dev'])
-
-    if len(devids) != 1:
-        module.fail_json(msg='device does not exist')
-    devid=devids[0]
-    
-    if params['mode'] == 'address':
-    
-        devaddrs = ip.get_addr(index=devid)
-        
-        ifaddrs = []
-        for ad in devaddrs:
-            ifip=list(filter(lambda x: x[0] == 'IFA_ADDRESS' , ad["attrs"]))[0][1]
-            prefix=ad['prefixlen']
-            
-            ipobj = parse_ip(u''+ifip+"/"+str(prefix))
-            if ipobj:
-                ifaddrs.append(ipobj)
-            
-        changed=False
-        
-        try:
-            if params["state"] == 'present':
-                if setto not in ifaddrs:
-                    ip.addr('add', index=devid, address=setto.ip.compressed, prefixlen=setto.network.prefixlen)
-                    changed=True
-            
-                #clean up possible same addresses with different netmasks
-                for ad in filter(lambda x: x != setto and x.ip == setto.ip, ifaddrs):
-                    ip.addr('delete', index=devid, address=ad.ip.compressed, prefixlen=ad.network.prefixlen)
-                    changed=True
-            elif params["state"] == 'absent':
-                if setto in ifaddrs:
-                    ip.addr('delete', index=devid, address=setto.ip.compressed, prefixlen=setto.network.prefixlen)
-                    changed=True
-                    
-        except NetlinkError:
-            e = get_exception()
-            module.fail_json(msg='could not perform operation: '+str(e))
-            
-        module.exit_json( changed=changed)
-        
-    elif params['mode'] == 'route':
-        
-        if type(setto) == ipaddress.IPv4Interface:
-            family = AF_INET
+                dev.del_addr(addr)
+                module.exit_json(changed=True)
         else:
-            family = AF_INET6
-        
-        routes=ip.get_routes(family=family)
-        
-        via=None
-        if params['via'] != None:
-            try:
-                via=parse_ip(u''+params['via'])
-            except Exception:
-                e = get_exception()
-                module.fail_json(msg='invalid via address: '+str(e))
-        
-        present=False
-        for route in routes:
-            oif=list(filter(lambda x: x[0] == 'RTA_OIF' , route["attrs"]))[0][1]
-            gws=list(filter(lambda x: x[0] == 'RTA_GATEWAY' , route["attrs"]))
-            gw=None
-            if len(gws) == 1:
-                gw=parse_ip(u''+gws[0][1])
+            if state == "present":
+                dev.add_addr(addr)
+                # clean up possible equal addresses with different prefix length
+                for badaddr in dev.get_addr_diff_lens(addr):
+                    dev.del_addr(badaddr)
                 
-            prefixlen = route['dst_len']
-            
-            dsts=list(filter(lambda x: x[0] == 'RTA_DST' , route["attrs"]))
-            if len(dsts) == 1:
-                dst=parse_ip(u''+dsts[0][1]+'/'+str(prefixlen))
+                module.exit_json(changed=True)
             else:
-                if family == AF_INET:
-                    dst=ipaddress.IPv4Interface(u'0.0.0.0/'+str(prefixlen))
-                else:
-                    dst=ipaddress.IPv6Interface(u'::/'+str(prefixlen))
-            
-            #print("set %s == %s" %(str(setto.network),str(dst.network)))
-            
-            if setto.network == dst.network and oif == devid:
-                if params['state']=='absent':
-                    try:
-                        ip.route('delete',dst=str(dst.network),oif=oif)
-                    except NetlinkError:
-                        e = get_exception()
-                        module.fail_json(msg='could not delete route: '+str(e))
-                    
-                    module.exit_json(changed=True)
-                if via == None:
-                    present=True
-                    break
-                elif gw.ip == via.ip:
-                    present=True
-                    break
-                     
-        
-        if not present and params['state']=='present':
-            try:
-                if via == None:
-                    ip.route('add', dst=str(setto.network), oif=devid)
-                else:
-                    ip.route('add', dst=str(setto.network), gateway=str(via.ip), oif=devid)
-            except NetlinkError:
-                e = get_exception()
-                module.fail_json(msg='could not add route: '+str(e))
+                changed=False
+                # delete all prefixes with of this ip
+                for badaddr in dev.get_addr_diff_lens(addr):
+                    dev.del_addr(badaddr)
+                    changed=True
                 
-            module.exit_json(changed=True)
+                module.exit_json(changed=changed)
         
-        module.exit_json(changed=False)
-        
-
-
+    elif mode == 'route':
+        module.fail_json(msg='Not yet implemented')
+    elif mode == 'link':
+        module.fail_json(msg='Not yet implemented')
+    
 # import module snippets
 from ansible.module_utils.basic import *
 if __name__ == '__main__':
