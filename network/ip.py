@@ -85,9 +85,9 @@ def parse_ip(text):
     except ipaddress.AddressValueError:
         try:
             addr = ipaddress.IPv4Interface(text)
-        except Exception as e:
+        except Exception, e:
             raise Exception(e)
-    except Exception as e:
+    except Exception, e:
         raise Exception(e)
         
     return(addr)
@@ -117,7 +117,7 @@ def main():
     
     try:
         setto=parse_ip(u''+params['addr'])
-    except Exception as e:
+    except Exception, e:
         module.fail_json(msg='invalid address: '+str(e))
     
     devids = ip.link_lookup(ifname=params['dev'])
@@ -156,7 +156,7 @@ def main():
                     ip.addr('delete', index=devid, address=setto.ip.compressed, prefixlen=setto.network.prefixlen)
                     changed=True
                     
-        except NetlinkError as e:
+        except NetlinkError, e:
             module.fail_json(msg='could not perform operation: '+str(e))
             
         module.exit_json( changed=changed)
@@ -174,7 +174,7 @@ def main():
         if params['via'] != None:
             try:
                 via=parse_ip(u''+params['via'])
-            except Exception as e:
+            except Exception, e:
                 module.fail_json(msg='invalid via address: '+str(e))
         
         present=False
@@ -202,7 +202,7 @@ def main():
                 if params['state']=='absent':
                     try:
                         ip.route('delete',dst=str(dst.network),oif=oif)
-                    except NetlinkError as e:
+                    except NetlinkError, e:
                         module.fail_json(msg='could not delete route: '+str(e))
                     
                     module.exit_json(changed=True)
@@ -220,7 +220,7 @@ def main():
                     ip.route('add', dst=str(setto.network), oif=devid)
                 else:
                     ip.route('add', dst=str(setto.network), gateway=str(via.ip), oif=devid)
-            except NetlinkError as e:
+            except NetlinkError, e:
                 module.fail_json(msg='could not add route: '+str(e))
                 
             module.exit_json(changed=True)
