@@ -205,6 +205,13 @@ class Device(object):
         except NetlinkError:
             e = get_exception()
             module.fail_json(msg='could not add device %s to bridge %s: %s'%(self.name,master.name,str(e)) )
+            
+    def set_up(self):
+        try:
+            ip.link("set", index=self.id, state="up")
+        except NetlinkError:
+            e = get_exception()
+            module.fail_json(msg='could not up device %s: %s'%(self.name,str(e)) )
     
     def del_master(self):
         try:
@@ -250,6 +257,7 @@ class Device(object):
             linkstate  = l_key(link,'IFLA_OPERSTATE')
             linkmaster = l_key(link,'IFLA_MASTER')
             
+            linkkind=None
             linkinfo = l_key(link,'IFLA_LINKINFO')
             vlanid = None
             if linkinfo:
@@ -495,12 +503,34 @@ def main():
                     Device.factoryCreateBridge(dev_name)
                     module.exit_json(changed=True)
                     
-            
+        
         #else up or down/delete interface
         else:
-        
-            module.fail_json(msg='Not yet implemented')
-    
+            
+            if state == "present":
+                if dev:
+                    if dev.state == 'UP':
+                        module.exit_json(changed=False)
+                    else:
+                        dev.set_up()
+                        module.exit_json(changed=True)
+                else:
+                    module.fail_json(msg='could not bring up %s, device does not exist'%(dev_name,))
+            else:
+                if dev:
+                    if dev.kind:
+                        # we can delete non system devices
+                        dev.delete()
+                        module.exit_json(changed=True)
+                    else:
+                        if dev.state == 'UP':
+                            dev.delete()
+                            module.exit_json(changed=True)
+                        else:
+                            module.exit_json(changed=False)
+                else:
+                    module.exit_json(changed=False)
+                
 # import module snippets
 from ansible.module_utils.basic import *
 if __name__ == '__main__':
