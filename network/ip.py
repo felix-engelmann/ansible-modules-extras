@@ -498,7 +498,7 @@ def main():
         # add an IF to a bridge
         if kind == 'port':
             
-            if state=="present":
+            if state == "present":
                 if not (dev and link):    
                     module.fail_json(msg='valid device and bridge required')
                 if not link.is_bridge():
@@ -509,7 +509,7 @@ def main():
                 else:
                     dev.set_master(link)
                     module.exit_json(changed=True)
-            if state=="absent":
+            if state == "absent":
                 if not (dev):    
                     module.fail_json(msg='valid device required')
                     
