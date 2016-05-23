@@ -162,7 +162,7 @@ def parse_ip(text):
 #object to hold all important information of a device
 class Device(object):
     
-    def __init__(self,name,devid,addresses,state,master,kind,vlanid):
+    def __init__(self,name,devid,addresses,state,master,kind,vlanid,link):
         self.name=name
         self.id=devid
         self.addresses=addresses
@@ -170,9 +170,19 @@ class Device(object):
         self.master=master
         self.kind=kind
         self.vlanid=vlanid
+        self.link=link
         
     def is_bridge(self):
-        return self.kind=='bridge'
+        return self.kind == 'bridge'
+        
+    def is_vlan(self,vlan_id,link):
+        return ( self.kind == 'vlan' and self.vlanid == vlan_id and self.link == link.id )
+        
+    def is_veth(self):
+        return self.kind == 'veth'
+    
+    def is_up(self):
+        return self.state == 'UP'
     
     # check if addr is assigned to this IF. Prefix has to match.
     def has_address(self, addr):
@@ -256,6 +266,7 @@ class Device(object):
             
             linkstate  = l_key(link,'IFLA_OPERSTATE')
             linkmaster = l_key(link,'IFLA_MASTER')
+            linklink   = l_key(link,'IFLA_LINK')
             
             linkkind=None
             linkinfo = l_key(link,'IFLA_LINKINFO')
@@ -267,7 +278,7 @@ class Device(object):
                     vlanid = l_key(infodata,'IFLA_VLAN_ID')
             
              
-            return Device(ifname,devids[0],addrs,linkstate,linkmaster,linkkind,vlanid)
+            return Device(ifname,devids[0],addrs,linkstate,linkmaster,linkkind,vlanid,linklink)
             
     # factory to create new bridge
     @staticmethod
@@ -277,6 +288,30 @@ class Device(object):
         except Exception:
             e = get_exception()
             module.fail_json(msg='could not create bridge %s: %s'%(ifname,str(e)))
+        
+        return Device.factoryDeviceFromName(ifname)
+        
+    # factory to create new vLan
+    @staticmethod
+    def factoryCreateVLAN(ifname,vlan_id,link):
+        try:
+            ip.link("add",ifname=ifname,kind="vlan",vlan_id=vlan_id,link=link.id)
+        except Exception:
+            e = get_exception()
+            module.fail_json(msg='could not create vlan %s tag %d on device %s: %s'%(ifname,vlan_id,link.name,str(e)))
+        
+        return Device.factoryDeviceFromName(ifname)
+    
+    @staticmethod
+    def factoryCreateVeth(ifname,peer):
+        try:
+            if peer:
+                ip.link("add",ifname=ifname,kind="veth",peer=peer)
+            else:
+                ip.link("add",ifname=ifname,kind="veth")
+        except Exception:
+            e = get_exception()
+            module.fail_json(msg='could not create veth %s peer %d: %s'%(ifname,peer,str(e)))
         
         return Device.factoryDeviceFromName(ifname)
     
@@ -502,14 +537,57 @@ def main():
                 else:
                     Device.factoryCreateBridge(dev_name)
                     module.exit_json(changed=True)
+        
+        elif kind == 'vlan':
+            
+            if state == "present" and not (link and vlan_id):    
+                module.fail_json(msg='valid parent device and tag required')
+            
+            if dev:
+                if dev.is_vlan(vlan_id,link):
+                    if state == "present":
+                        module.exit_json(changed=False)
+                    else:
+                        dev.delete()
+                        module.exit_json(changed=True)
+                else:
+                    module.fail_json(msg='existing device %s does not match'%(dev.name,))
+            else:
+                if state == "present":
+                    Device.factoryCreateVLAN(dev_name,vlan_id,link)
+                    module.exit_json(changed=True)
+                else:
+                    module.exit_json(changed=False)
+        
+        elif kind == 'veth':
+            # there is no mean to check which is the peer interface.
+            
+            if link:
+                if not link.is_veth():
+                    module.fail_json(msg='existing peer device %s is no veth'%(link.name,))
                     
+            if dev:
+                if dev.is_veth():
+                    if state == "present":
+                        module.exit_json(changed=False)
+                    else:
+                        dev.delete()
+                        module.exit_json(changed=True)
+                else:
+                    module.fail_json(msg='existing device %s is no veth'%(dev.name,))
+            else:
+                if state == "present":
+                    Device.factoryCreateVeth(dev_name,link_name)
+                    module.exit_json(changed=True)
+                else:
+                    module.exit_json(changed=False)
         
         #else up or down/delete interface
         else:
             
             if state == "present":
                 if dev:
-                    if dev.state == 'UP':
+                    if dev.is_up():
                         module.exit_json(changed=False)
                     else:
                         dev.set_up()
@@ -523,7 +601,7 @@ def main():
                         dev.delete()
                         module.exit_json(changed=True)
                     else:
-                        if dev.state == 'UP':
+                        if dev.is_up():
                             dev.delete()
                             module.exit_json(changed=True)
                         else:
