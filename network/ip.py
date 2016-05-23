@@ -129,13 +129,6 @@ except ImportError:
 ip=None
 module=None
 
-def l_key(l,key):
-    elems=list(filter(lambda x: x[0] == key,l))
-    if len(elems) == 0:
-        return None
-    else:
-        return elems[0][1]
-
 def parse_ip(text):
     addr=None
     if text:
@@ -254,7 +247,7 @@ class Device(object):
             addrs=[]
             
             for addr in devaddrs:
-                ifip = l_key(addr['attrs'],'IFA_ADDRESS')
+                ifip = addr.get_attr('IFA_ADDRESS')
                 prefixlen = addr['prefixlen']
                 
                 addrobj = parse_ip(ifip+"/"+str(prefixlen))
@@ -262,20 +255,20 @@ class Device(object):
                     addrs.append(addrobj)
         
             # fetch link related information
-            link = ip.get_links(devids[0])[0]['attrs']
+            link = ip.get_links(devids[0])[0]
             
-            linkstate  = l_key(link,'IFLA_OPERSTATE')
-            linkmaster = l_key(link,'IFLA_MASTER')
-            linklink   = l_key(link,'IFLA_LINK')
+            linkstate  = link.get_attr('IFLA_OPERSTATE')
+            linkmaster = link.get_attr('IFLA_MASTER')
+            linklink   = link.get_attr('IFLA_LINK')
             
             linkkind=None
-            linkinfo = l_key(link,'IFLA_LINKINFO')
+            linkinfo = link.get_attr('IFLA_LINKINFO')
             vlanid = None
             if linkinfo:
-                linkkind=l_key(linkinfo['attrs'],'IFLA_INFO_KIND')
+                linkkind=linkinfo.get_attr('IFLA_INFO_KIND')
                 if linkkind == 'vlan':
-                    infodata = l_key(linkinfo['attrs'],'IFLA_INFO_DATA')['attrs']
-                    vlanid = l_key(infodata,'IFLA_VLAN_ID')
+                    infodata = linkinfo.get_attr('IFLA_INFO_DATA')
+                    vlanid = infodata.get_attr('IFLA_VLAN_ID')
             
              
             return Device(ifname,devids[0],addrs,linkstate,linkmaster,linkkind,vlanid,linklink)
@@ -317,6 +310,8 @@ class Device(object):
     
     def dump(self):
         print("if: %s (%d) %s"%(self.name,self.id,self.state))
+        if self.vlanid:
+            print(" vlan: %d"%(self.vlanid,))
         for a in self.addresses:
             print(" - %s/%d"%(a.ip.compressed,a.network.prefixlen))
 
@@ -381,12 +376,12 @@ class Routes(object):
         for family in [AF_INET,AF_INET6]:
             routes=ip.get_routes(family=family)
             for route in routes:
-                rif   = l_key(route['attrs'],'RTA_OIF')
-                rgw   = l_key(route['attrs'],'RTA_GATEWAY')
+                rif   = route.get_attr('RTA_OIF')
+                rgw   = route.get_attr('RTA_GATEWAY')
                 rvia = None
                 if rgw:
                     rvia = parse_ip(rgw)
-                rdst  = l_key(route['attrs'],'RTA_DST')
+                rdst  = route.get_attr('RTA_DST')
                 rplen = route['dst_len']
                 if rplen == 0:
                     # default route
