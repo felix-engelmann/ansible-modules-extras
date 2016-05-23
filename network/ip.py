@@ -156,7 +156,7 @@ def parse_ip(text):
                     module.fail_json(msg='can not parse ip %s : %s'%(text,str(e)))
             except Exception:
                 e = get_exception()
-                module.fail_json(msg='can not parse ip %s : %s'%(text,str(e)))
+                module.fail_json(msg='can not parse ip %s: %s'%(text,str(e)))
     return(addr)
 
 #object to hold all important information of a device
@@ -198,7 +198,33 @@ class Device(object):
             e = get_exception()
             module.fail_json(msg='could not delete address %s from device %s: %s'%(addr.ip.compressed,self.name,str(e)) )
     
-    #factory device from device name
+    
+    def set_master(self,master):
+        try:
+            ip.link("set", index=self.id, master=master.id)
+        except NetlinkError:
+            e = get_exception()
+            module.fail_json(msg='could not add device %s to bridge %s: %s'%(self.name,master.name,str(e)) )
+    
+    def del_master(self):
+        try:
+            ip.link("set", index=self.id, master=0)
+        except NetlinkError:
+            e = get_exception()
+            module.fail_json(msg='could not remove device %s from bridge: %s'%(self.name,str(e)) )
+    
+    def delete(self):
+        try:
+            if self.kind:
+                ip.link("del",index=self.id)
+            else:
+                # system interface
+                ip.link("set", index=self.id, state="down")      
+        except NetlinkError:
+            e = get_exception()
+            module.fail_json(msg='could not delete or down device %s: %s'%(self.name,str(e)) )
+    
+    # factory device from device name
     @staticmethod
     def factoryDeviceFromName(ifname):
         devids = ip.link_lookup(ifname=ifname)
@@ -225,7 +251,6 @@ class Device(object):
             linkmaster = l_key(link,'IFLA_MASTER')
             
             linkinfo = l_key(link,'IFLA_LINKINFO')
-            linkkind = 'system'
             vlanid = None
             if linkinfo:
                 linkkind=l_key(linkinfo['attrs'],'IFLA_INFO_KIND')
@@ -236,6 +261,17 @@ class Device(object):
              
             return Device(ifname,devids[0],addrs,linkstate,linkmaster,linkkind,vlanid)
             
+    # factory to create new bridge
+    @staticmethod
+    def factoryCreateBridge(ifname):
+        try:
+            ip.link("add",ifname=ifname,kind="bridge")
+        except Exception:
+            e = get_exception()
+            module.fail_json(msg='could not create bridge %s: %s'%(ifname,str(e)))
+        
+        return Device.factoryDeviceFromName(ifname)
+    
     def dump(self):
         print("if: %s (%d) %s"%(self.name,self.id,self.state))
         for a in self.addresses:
@@ -350,15 +386,17 @@ def main():
     ip = IPRoute()
     
     # parameters and their processing
-    params  = module.params
-    mode    = params['mode']
-    state   = params['state']
-    addr    = parse_ip(params['addr'])
-    dev     = Device.factoryDeviceFromName(params['dev'])
-    via     = parse_ip(params['via'])
-    kind    = params['kind']
-    link    = Device.factoryDeviceFromName(params['dev'])
-    vlan_id = params['vlan_id']
+    params    = module.params
+    mode      = params['mode']
+    state     = params['state']
+    addr      = parse_ip(params['addr'])
+    dev       = Device.factoryDeviceFromName(params['dev'])
+    dev_name  = params['dev']
+    via       = parse_ip(params['via'])
+    kind      = params['kind']
+    link      = Device.factoryDeviceFromName(params['link'])
+    link_name = params['link']
+    vlan_id   = params['vlan_id']
      
     # separate different modes
     if mode == 'address':
@@ -413,7 +451,55 @@ def main():
             module.exit_json(changed=True)
                 
     elif mode == 'link':
-        module.fail_json(msg='Not yet implemented')
+        
+        # add an IF to a bridge
+        if kind == 'port':
+            
+            if state=="present":
+                if not (dev and link):    
+                    module.fail_json(msg='valid device and bridge required')
+                if not link.is_bridge():
+                    module.fail_json(msg='bridge is not a bridge')
+                    
+                if dev.master == link.id:
+                    module.exit_json(changed=False)
+                else:
+                    dev.set_master(link)
+                    module.exit_json(changed=True)
+            if state=="absent":
+                if not (dev):    
+                    module.fail_json(msg='valid device required')
+                    
+                if dev.master == None:
+                    module.exit_json(changed=False)
+                else:
+                    dev.del_master()
+                    module.exit_json(changed=True)
+        
+        # create bridge
+        elif kind == 'bridge':
+            
+            if dev:
+                if dev.is_bridge():
+                    if state == "present":
+                        module.exit_json(changed=False)
+                    else:
+                        dev.delete()
+                        module.exit_json(changed=True)
+                else:
+                    module.fail_json(msg='device %s exists but is not a bridge'%(dev.name,))
+            else:
+                if state == "absent":
+                    module.exit_json(changed=False)
+                else:
+                    Device.factoryCreateBridge(dev_name)
+                    module.exit_json(changed=True)
+                    
+            
+        #else up or down/delete interface
+        else:
+        
+            module.fail_json(msg='Not yet implemented')
     
 # import module snippets
 from ansible.module_utils.basic import *
