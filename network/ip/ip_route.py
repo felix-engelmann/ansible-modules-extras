@@ -15,66 +15,36 @@
 
 DOCUMENTATION = '''
 ---
-module: ip
+module: ip_route
 version_added: 2.2
 author: "Felix Engelmann (@felix-engelmann)"
-short_description: Wrapper of the linux ip tool
+short_description: Managing linux routes
 requirements: [ pyroute2 ]
 description:
-    - Performs linux ip address manipulations for interfaces and route adjustments.
+    - Performs linux ip route adjustments.
 options:
-    mode:
-        required: true
-        choices: [ address, route, link ]
-        description:
-            - Whether to change an address, route or interface.
     state:
         required: false
         default: "present"
         choices: [ present, absent ]
         description:
-            - Whether the address should be assigned to the interface or removed
-              respectively whether the route should be set or removed.
-              or the interface should be brought up or down
-    addr:
+            - Whether the the route should be set or removed.
+    net:
         required: false
-        aliases: [ net ]
         description:
-            - The address to set or remove with prefix length. (e.g. 2001:db8::2/64, 10.0.0.2/24, 10.0.0.2/255.255.255.0)
-              For nets, the default route is specified by v4default or v6default .
+            - The net to set or remove with prefix length. (e.g. 2001:db8::2/64, 10.0.0.2/24, 10.0.0.2/255.255.255.0).
+              The default route is specified by v4default or v6default .
     dev:
         required: true
         description:
-            - The device to set or remove the address/route from. Or the name of the new link.
+            - The device to set or remove the route from. Or the name of the new link.
     via:
         required: false
         description:
             - IP address of gateway for manipulating routes.
-    kind:
-        required: false
-        choices: [ bridge, vlan, veth, port ]
-        description:
-            - Type of link to create or to set/remove interface as port of bridge.
-    link:
-        required: false
-        aliases: [ peer, master ]
-        description:
-            - The interface name of the parent link for vlan or second peer for veth interfaces.
-    vlan_id:
-        required: false
-        description:
-            - The vlan ID for vlan interfaces.
 '''
 
 EXAMPLES = '''
-# set address 2001:db8::42/64 to interface eth0
-- ip: mode=address addr=2001:db8::42/64 dev=eth0 state=present
-
-# change prefix length (watch out that any other assignments of same address with different prefix will be deleted)
-- ip: mode=address addr=2001:db8::42/112 dev=eth0 state=present
-
-# remove address from interface eth0
-- ip: mode=address addr=2001:db8::42/112 dev=eth0 state=absent
 
 # add route for net 2001:db3::/48 via fe80::3123 through interface eth0
 - ip: mode=route net=2001:db3::/48 via=fe80::3123 dev=eth0
@@ -84,30 +54,6 @@ EXAMPLES = '''
 
 # remove IPv6 default route at interface eth0
 - ip: mode=route net=::/0 dev=eth0 state=absent
-
-# create bridge br0
-- ip: mode=link dev=br0 kind=bridge
-
-# add eth0 to bridge br0
-- ip: mode=link dev=eth0 kind=port master=br0
-
-# remove eth0 from bridge
-- ip: mode=link dev=eth0 kind=port state=absent
-
-# create a veth interface pair of v1p0 and v1p1
-- ip: mode=link dev=v1p0 kind=veth peer=v1p1
-
-# add vlan interface with id 42 onto eth0
-- ip: mode=link dev=v100 kind=vlan link=eth0 vlan_id=42
-
-# delete interface br0
-- ip: mode=link dev=br0 state=absent 
-
-# bring up existing interface
-- ip: mode=link dev=eth1 
-
-# bring down pyhsical interface
-- ip: mode=link dev=eth1 state=absent 
 
 '''
 
@@ -403,14 +349,10 @@ def main():
     global module
     module = AnsibleModule(
         argument_spec = dict(
-            mode  = dict(choices=['address','route','link'], default=None, required=True),
             state = dict(choices=['present','absent'], default='present'),
-            addr  = dict(default=None,aliases=['net']),
+            net   = dict(default=None),
             dev   = dict(default=None,required=True),
             via   = dict(default=None),
-            kind  = dict(choices=['bridge','vlan','veth','port'],default=None),
-            link  = dict(default=None,aliases=['peer','master']),
-            vlan_id= dict(default=None,type='int'),
         ),
     )
     
@@ -425,184 +367,35 @@ def main():
     
     # parameters and their processing
     params    = module.params
-    mode      = params['mode']
     state     = params['state']
-    addr      = parse_ip(params['addr'])
+    addr      = parse_ip(params['net'])
     dev       = Device.factoryDeviceFromName(params['dev'])
     dev_name  = params['dev']
     via       = parse_ip(params['via'])
-    kind      = params['kind']
-    link      = Device.factoryDeviceFromName(params['link'])
-    link_name = params['link']
-    vlan_id   = params['vlan_id']
      
-    # separate different modes
-    if mode == 'address':
-        # check for required arguments
-        if not (dev and addr):    
-            module.fail_json(msg='valid device and address required')
+   
+    if not (dev and addr):    
+        module.fail_json(msg='valid interface and network required')
         
-        if dev.has_address(addr):
-            if state == "present":
-                module.exit_json(changed=False)
-            else:
-                dev.del_addr(addr)
-                module.exit_json(changed=True)
-        else:
-            if state == "present":
-                dev.add_addr(addr)
-                # clean up possible equal addresses with different prefix length
-                for badaddr in dev.get_addr_diff_lens(addr):
-                    dev.del_addr(badaddr)
-                
-                module.exit_json(changed=True)
-            else:
-                changed=False
-                # delete all prefixes with of this ip
-                for badaddr in dev.get_addr_diff_lens(addr):
-                    dev.del_addr(badaddr)
-                    changed=True
-                
-                module.exit_json(changed=changed)
-        
-    elif mode == 'route':
-        if not (dev and addr):    
-            module.fail_json(msg='valid device and network required')
-            
-        routes = Routes.factoryRoutes()
-        
-        if state == "absent":
-            if routes.has_route_any_gw(addr,dev):
-                routes.del_route(addr,dev)
-                module.exit_json(changed=True)
-            else:
-                module.exit_json(changed=False)
-        else:
-            if routes.has_route(addr,dev,via):
-                module.exit_json(changed=False)
-            elif routes.has_route_any_gw(addr,dev):
-                # route exists but with different gateway
-                # remove it before adding new route
-                routes.del_route(addr,dev)
-            
-            routes.add_route(addr,dev,via)
+    routes = Routes.factoryRoutes()
+    
+    if state == "absent":
+        if routes.has_route_any_gw(addr,dev):
+            routes.del_route(addr,dev)
             module.exit_json(changed=True)
-                
-    elif mode == 'link':
-        
-        # add an IF to a bridge
-        if kind == 'port':
-            
-            if state == "present":
-                if not (dev and link):    
-                    module.fail_json(msg='valid device and bridge required')
-                if not link.is_bridge():
-                    module.fail_json(msg='bridge is not a bridge')
-                    
-                if dev.master == link.id:
-                    module.exit_json(changed=False)
-                else:
-                    dev.set_master(link)
-                    module.exit_json(changed=True)
-            if state == "absent":
-                if not (dev):    
-                    module.fail_json(msg='valid device required')
-                    
-                if dev.master == None:
-                    module.exit_json(changed=False)
-                else:
-                    dev.del_master()
-                    module.exit_json(changed=True)
-        
-        # create bridge
-        elif kind == 'bridge':
-            
-            if dev:
-                if dev.is_bridge():
-                    if state == "present":
-                        module.exit_json(changed=False)
-                    else:
-                        dev.delete()
-                        module.exit_json(changed=True)
-                else:
-                    module.fail_json(msg='device %s exists but is not a bridge'%(dev.name,))
-            else:
-                if state == "absent":
-                    module.exit_json(changed=False)
-                else:
-                    Device.factoryCreateBridge(dev_name)
-                    module.exit_json(changed=True)
-        
-        elif kind == 'vlan':
-            
-            if state == "present" and not (link and vlan_id):    
-                module.fail_json(msg='valid parent device and tag required')
-            
-            if dev:
-                if dev.is_vlan(vlan_id,link):
-                    if state == "present":
-                        module.exit_json(changed=False)
-                    else:
-                        dev.delete()
-                        module.exit_json(changed=True)
-                else:
-                    module.fail_json(msg='existing device %s does not match'%(dev.name,))
-            else:
-                if state == "present":
-                    Device.factoryCreateVLAN(dev_name,vlan_id,link)
-                    module.exit_json(changed=True)
-                else:
-                    module.exit_json(changed=False)
-        
-        elif kind == 'veth':
-            # there is no mean to check which is the peer interface.
-            
-            if link:
-                if not link.is_veth():
-                    module.fail_json(msg='existing peer device %s is no veth'%(link.name,))
-                    
-            if dev:
-                if dev.is_veth():
-                    if state == "present":
-                        module.exit_json(changed=False)
-                    else:
-                        dev.delete()
-                        module.exit_json(changed=True)
-                else:
-                    module.fail_json(msg='existing device %s is no veth'%(dev.name,))
-            else:
-                if state == "present":
-                    Device.factoryCreateVeth(dev_name,link_name)
-                    module.exit_json(changed=True)
-                else:
-                    module.exit_json(changed=False)
-        
-        #else up or down/delete interface
         else:
-            
-            if state == "present":
-                if dev:
-                    if dev.is_up():
-                        module.exit_json(changed=False)
-                    else:
-                        dev.set_up()
-                        module.exit_json(changed=True)
-                else:
-                    module.fail_json(msg='could not bring up %s, device does not exist'%(dev_name,))
-            else:
-                if dev:
-                    if dev.kind:
-                        # we can delete non system devices
-                        dev.delete()
-                        module.exit_json(changed=True)
-                    else:
-                        if dev.is_up():
-                            dev.delete()
-                            module.exit_json(changed=True)
-                        else:
-                            module.exit_json(changed=False)
-                else:
-                    module.exit_json(changed=False)
+            module.exit_json(changed=False)
+    else:
+        if routes.has_route(addr,dev,via):
+            module.exit_json(changed=False)
+        elif routes.has_route_any_gw(addr,dev):
+            # route exists but with different gateway
+            # remove it before adding new route
+            routes.del_route(addr,dev)
+        
+        routes.add_route(addr,dev,via)
+        module.exit_json(changed=True)
+                
                 
 # import module snippets
 from ansible.module_utils.basic import *
